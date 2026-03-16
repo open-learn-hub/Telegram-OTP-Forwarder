@@ -160,46 +160,88 @@ def _fetch_netflix_emails() -> list[tuple[str, str, str]]:
     """
     Synchronous IMAP fetch (runs in executor).
     Returns list of (subject, sender, otp) tuples for unread Netflix OTP emails.
+    Scans across all available folders, not just INBOX.
     """
     found: list[tuple[str, str, str]] = []
 
     with imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT) as imap:
         imap.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-        imap.select("INBOX")
-
-        # Search for UNSEEN emails (all senders — we filter below)
-        status, message_ids = imap.search(None, "UNSEEN")
-        if status != "OK" or not message_ids[0]:
+        
+        # Get list of all mailboxes
+        status, mailboxes = imap.list()
+        if status != "OK":
             return found
+            
+        # Extract mailbox names handling spaces and quotes correctly
+        mailbox_names = []
+        for mailbox in mailboxes:
+            # imap.list() returns items like: b'(\\HasNoChildren) "/" "INBOX"'
+            # or b'(\\HasNoChildren) "/" "[Gmail]/All Mail"'
+            parts = mailbox.decode("utf-8").split(' "/" ')
+            if len(parts) == 2:
+                mailbox_names.append(parts[1].strip('"'))
+                
+        # Prioritize INBOX, then Updates (inserted at 0, so Updates becomes first)
+        for name in list(mailbox_names):
+            if name.upper() == "INBOX":
+                mailbox_names.remove(name)
+                mailbox_names.insert(0, name)
+                
+        for name in list(mailbox_names):
+            if "updates" in name.lower():
+                mailbox_names.remove(name)
+                mailbox_names.insert(0, name)
 
-        for msg_id in message_ids[0].split():
-            status, msg_data = imap.fetch(msg_id, "(RFC822)")
-            if status != "OK":
-                continue
+        for mailbox in mailbox_names:
+            try:
+                # Need to quote mailbox names spaces, e.g. "[Gmail]/All Mail"
+                status, _ = imap.select(f'"{mailbox}"', readonly=False)
+                if status != "OK":
+                    continue
 
-            raw = msg_data[0][1]
-            msg = email.message_from_bytes(raw)
+                # Search for UNSEEN emails
+                status, message_ids = imap.search(None, "UNSEEN")
+                if status != "OK" or not message_ids[0]:
+                    continue
 
-            from_header = decode_mime_words(msg.get("From", ""))
-            subject = decode_mime_words(msg.get("Subject", "(no subject)"))
+                msg_ids = message_ids[0].split()
+                msg_ids.reverse()  # Process newest emails first
 
-            # Filter: only Netflix senders
-            if not is_netflix_sender(from_header):
-                # Mark back as unread so we don't skip legitimate unread mail
-                imap.store(msg_id, "-FLAGS", "\\Seen")
-                continue
+                for msg_id in msg_ids:
+                    # If we already found an OTP in any folder, mark the rest as SEEN and skip
+                    if found:
+                        imap.store(msg_id, "+FLAGS", "\\Seen")
+                        continue
 
-            logger.info("📧 Netflix email found — Subject: %s | From: %s", subject, from_header)
+                    status, msg_data = imap.fetch(msg_id, "(RFC822)")
+                    if status != "OK":
+                        continue
 
-            body = get_email_body(msg)
-            otp = extract_otp(body)
+                    raw = msg_data[0][1]
+                    msg = email.message_from_bytes(raw)
 
-            if otp:
-                found.append((subject, from_header, otp))
-            else:
-                logger.warning(
-                    "⚠️  Could not extract OTP from Netflix email. Subject: %s", subject
-                )
+                    from_header = decode_mime_words(msg.get("From", ""))
+                    subject = decode_mime_words(msg.get("Subject", "(no subject)"))
+
+                    # Filter: only Netflix senders
+                    if not is_netflix_sender(from_header):
+                        # Mark back as unread so we don't skip legitimate unread mail
+                        imap.store(msg_id, "-FLAGS", "\\Seen")
+                        continue
+
+                    logger.info("📧 Netflix email found in %s — Subject: %s", mailbox, subject)
+
+                    body = get_email_body(msg)
+                    otp = extract_otp(body)
+
+                    if otp:
+                        found.append((subject, from_header, otp))
+                    else:
+                        logger.warning(
+                            "⚠️  Could not extract OTP from Netflix email. Subject: %s", subject
+                        )
+            except Exception as e:
+                logger.error("Error scanning mailbox %s: %s", mailbox, e)
 
     return found
 
@@ -240,13 +282,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler for /chatid — useful for finding the group's chat ID."""
     chat = update.effective_chat
-    count = await chat.get_member_count()
     await update.message.reply_text(
         f"ℹ️ Chat info:\n"
-        f"  ID     : {chat.id}\n"
-        f"  Type   : {chat.type}\n"
+        f"  ID     : {chat.id}\n"        
         f"  Title  : {chat.title or 'N/A'}\n"
-        f"  Members: {count}"
     )
 
 

@@ -151,49 +151,74 @@ def test_email():
             imap.login(EMAIL_ADDR, EMAIL_PASS)
             print("  ✅ Login successful!")
 
-            imap.select("INBOX")
-
-            # Search ALL (not just UNSEEN) for the test so we can see recent Netflix emails
-            status, data = imap.search(None, "ALL")
-            all_ids = data[0].split() if data[0] else []
-            print(f"\n  Total emails in INBOX : {len(all_ids)}")
-
-            # Check last 20 emails for anything from Netflix
-            recent = all_ids[-20:] if len(all_ids) >= 20 else all_ids
-            print(f"  Scanning last {len(recent)} emails for Netflix senders...\n")
+            # Get list of all mailboxes
+            status, mailboxes = imap.list()
+            mailbox_names = []
+            if status == "OK":
+                for mailbox in mailboxes:
+                    parts = mailbox.decode("utf-8").split(' "/" ')
+                    if len(parts) == 2:
+                        mailbox_names.append(parts[1].strip('"'))
+            
+            for name in list(mailbox_names):
+                if "updates" in name.lower():
+                    mailbox_names.remove(name)
+                    mailbox_names.insert(0, name)
 
             found = 0
-            for msg_id in reversed(recent):
-                _, msg_data = imap.fetch(msg_id, "(RFC822)")
-                raw = msg_data[0][1]
-                msg = email.message_from_bytes(raw)
+            scanned_total = 0
 
-                from_hdr = decode_mime(msg.get("From", ""))
-                subject  = decode_mime(msg.get("Subject", "(no subject)"))
-                from_lower = from_hdr.lower()
+            print(f"  Scanning across {len(mailbox_names)} folders for recent Netflix emails...\n")
 
-                is_netflix = any(s in from_lower for s in NETFLIX_SENDERS)
+            for mailbox in mailbox_names:
+                if found >= 5 or scanned_total >= 50:  # Cap the test scan
+                    break
 
-                # Show all emails found, flag Netflix ones
-                flag = "🎬 NETFLIX" if is_netflix else "   other  "
-                print(f"  [{flag}] {subject[:55]:<55} | {from_hdr[:40]}")
+                try:
+                    status, _ = imap.select(f'"{mailbox}"', readonly=True)
+                    if status != "OK":
+                        continue
 
-                if is_netflix:
-                    found += 1
-                    body = get_body(msg)
-                    otp, pattern = extract_otp(body)
-                    if otp:
-                        print(f"           └─ ✅ OTP extracted: {otp}  (matched: {pattern})")
-                    else:
-                        print(f"           └─ ⚠️  No OTP found in body (may need regex update)")
-                        # Show a snippet of the body to help debug
-                        snippet = " ".join(body.split())[:300]
-                        print(f"              Body snippet: {snippet}")
+                    # Search ALL to see recent history (not just unread)
+                    status, data = imap.search(None, "ALL")
+                    all_ids = data[0].split() if data[0] else []
+                    
+                    if not all_ids:
+                        continue
+
+                    # Look at the last 10 emails in this folder
+                    recent = all_ids[-10:] if len(all_ids) >= 10 else all_ids
+                    
+                    for msg_id in reversed(recent):
+                        scanned_total += 1
+                        _, msg_data = imap.fetch(msg_id, "(RFC822)")
+                        raw = msg_data[0][1]
+                        msg = email.message_from_bytes(raw)
+
+                        from_hdr = decode_mime(msg.get("From", ""))
+                        subject  = decode_mime(msg.get("Subject", "(no subject)"))
+                        from_lower = from_hdr.lower()
+
+                        is_netflix = any(s in from_lower for s in NETFLIX_SENDERS)
+
+                        if is_netflix:
+                            found += 1
+                            print(f"  [🎬 NETFLIX] {subject[:50]:<50} | Folder: {mailbox}")
+                            body = get_body(msg)
+                            otp, pattern = extract_otp(body)
+                            if otp:
+                                print(f"           └─ ✅ OTP extracted: {otp}  (matched: {pattern})")
+                            else:
+                                print(f"           └─ ⚠️  No OTP found in body")
+                                snippet = " ".join(body.split())[:150]
+                                print(f"              Snippet: {snippet}")
+
+                except Exception as e:
+                    print(f"  ❌ Error scanning {mailbox}: {e}")
 
             if found == 0:
-                print(f"\n  ⚠️  No Netflix emails found in last {len(recent)} messages.")
+                print(f"\n  ⚠️  No Netflix emails found in the last {scanned_total} messages across {len(mailbox_names)} folders.")
                 print("  → Send yourself a Netflix verification email and re-run.")
-                print("  → Or check NETFLIX_SENDER in .env matches the actual sender address.")
 
     except imaplib.IMAP4.error as e:
         print(f"\n  ❌ IMAP error: {e}")
