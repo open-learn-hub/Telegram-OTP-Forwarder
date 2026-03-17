@@ -80,9 +80,15 @@ def get_body(msg):
 
 
 OTP_PATTERNS = [
-    r"(?:verification|confirm|access|security|sign.?in)[^\d]{0,30}(\d{4,8})",
-    r"(?:code|OTP|passcode)[^\d]{0,10}(\d{4,8})",
-    r"\b(\d{4,8})\b",
+    # 1. Look for a 4-8 digit code at the very start of the string
+    r"^\s*(\d{4,8})\b",
+
+    # 2. Look for digits that are NOT part of a URL/alphanumeric string
+    # This uses 'negative lookarounds' to ensure no letters or digits touch the OTP
+    r"(?<![a-zA-Z0-9])(\d{4,8})(?![a-zA-Z0-9])",
+
+    # 3. If keywords are used, ensure we aren't grabbing part of a hex string/GUID
+    r"(?:verification|confirm|access|security|sign.?in).{0,30}?\b(\d{4,8})\b"
 ]
 
 def extract_otp(text):
@@ -232,7 +238,8 @@ def test_email():
 
 def test_otp():
     samples = [
-        ("Netflix code in body",      "Your verification code is: 483920. Use it within 15 minutes."),
+        ("Netflix code in body",       "Your verification code is: 483920. Use it within 15 minutes."),
+        ("Netflix code in body 2",     "0596 Use it within 15 minutes. [https://www.netflix.com/accountaccess?g=2088fc7d-9235-4863-9b5a-b2bdb32fcf70&lkid=URL_ACCOUNT_ACCESS&lnktrk=EVO]"),
         ("OTP label",                  "OTP: 7291"),
         ("Sign-in code",               "Sign-in code 123456 for your Netflix account."),
         ("Standalone number",          "Please use the code 8821 to verify your identity."),

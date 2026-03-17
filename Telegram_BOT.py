@@ -17,12 +17,13 @@ import logging
 import os
 import re
 from email.header import decode_header
-from typing import Optional
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 from telegram import Bot, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.helpers import escape_markdown
 
 # ─── Load configuration ───────────────────────────────────────────────────────
 load_dotenv()
@@ -56,12 +57,15 @@ logger = logging.getLogger("netflix-otp-bot")
 
 # Patterns ordered from most specific to least specific
 OTP_PATTERNS = [
-    # "Your verification code is: 123456"
-    r"(?:verification|confirm|access|security|sign.?in)[^\d]{0,30}(\d{4,8})",
-    # "Code: 123456" or "OTP: 123456"
-    r"(?:code|OTP|passcode)[^\d]{0,10}(\d{4,8})",
-    # Standalone 4-8 digit number (last resort)
-    r"\b(\d{4,8})\b",
+    # 1. Look for a 4-8 digit code at the very start of the string
+    r"^\s*(\d{4,8})\b",
+
+    # 2. Look for digits that are NOT part of a URL/alphanumeric string
+    # This uses 'negative lookarounds' to ensure no letters or digits touch the OTP
+    r"(?<![a-zA-Z0-9])(\d{4,8})(?![a-zA-Z0-9])",
+
+    # 3. If keywords are used, ensure we aren't grabbing part of a hex string/GUID
+    r"(?:verification|confirm|access|security|sign.?in).{0,30}?\b(\d{4,8})\b"
 ]
 
 
@@ -148,18 +152,18 @@ async def poll_email(bot: Bot) -> None:
 async def _check_inbox(bot: Bot) -> None:
     """Connect to IMAP, search for unread Netflix emails, and forward OTPs."""
     # Run blocking IMAP I/O in a thread so we don't block the event loop
-    loop = asyncio.get_event_loop()
-    results = await loop.run_in_executor(None, _fetch_netflix_emails)
+    results = await asyncio.to_thread(_fetch_netflix_emails)
 
     for subject, sender, otp in results:
         logger.info("🔐 OTP found: %s | Subject: %s", otp, subject)
         await _send_otp_to_telegram(bot, subject, sender, otp)
 
 
-def _fetch_netflix_emails() -> list[tuple[str, str, str]]:
+def _fetch_netflix_emails(fetch_latest: bool = False, *args: Any, **kwargs: Any) -> list[tuple[str, str, str]]:
     """
     Synchronous IMAP fetch (runs in executor).
     Returns list of (subject, sender, otp) tuples for unread Netflix OTP emails.
+    If fetch_latest is True, ignores the UNSEEN flag and just attempts to find the most recent Netflix email containing an OTP.
     Scans across all available folders, not just INBOX.
     """
     found: list[tuple[str, str, str]] = []
@@ -175,8 +179,6 @@ def _fetch_netflix_emails() -> list[tuple[str, str, str]]:
         # Extract mailbox names handling spaces and quotes correctly
         mailbox_names = []
         for mailbox in mailboxes:
-            # imap.list() returns items like: b'(\\HasNoChildren) "/" "INBOX"'
-            # or b'(\\HasNoChildren) "/" "[Gmail]/All Mail"'
             parts = mailbox.decode("utf-8").split(' "/" ')
             if len(parts) == 2:
                 mailbox_names.append(parts[1].strip('"'))
@@ -189,22 +191,26 @@ def _fetch_netflix_emails() -> list[tuple[str, str, str]]:
         for mailbox in mailbox_names:
             try:
                 # Need to quote mailbox names spaces, e.g. "[Gmail]/All Mail"
-                status, _ = imap.select(f'"{mailbox}"', readonly=False)
+                status, _ = imap.select(f'"{mailbox}"', readonly=fetch_latest)
                 if status != "OK":
                     continue
 
-                # Search for UNSEEN emails
-                status, message_ids = imap.search(None, "UNSEEN")
+                # Search emails
+                search_criteria = "ALL" if fetch_latest else "UNSEEN"
+                status, message_ids = imap.search(None, search_criteria)
                 if status != "OK" or not message_ids[0]:
                     continue
 
                 msg_ids = message_ids[0].split()
+                if fetch_latest:
+                    msg_ids = msg_ids[-10:]  # Only check the last 10 messages for performance
                 msg_ids.reverse()  # Process newest emails first
 
                 for msg_id in msg_ids:
                     # If we already found an OTP in any folder, mark the rest as SEEN and skip
                     if found:
-                        imap.store(msg_id, "+FLAGS", "\\Seen")
+                        if not fetch_latest:
+                            imap.store(msg_id, "+FLAGS", "\\Seen")
                         continue
 
                     status, msg_data = imap.fetch(msg_id, "(RFC822)")
@@ -220,7 +226,8 @@ def _fetch_netflix_emails() -> list[tuple[str, str, str]]:
                     # Filter: only Netflix senders
                     if not is_netflix_sender(from_header):
                         # Mark back as unread so we don't skip legitimate unread mail
-                        imap.store(msg_id, "-FLAGS", "\\Seen")
+                        if not fetch_latest:
+                            imap.store(msg_id, "-FLAGS", "\\Seen")
                         continue
 
                     logger.info("📧 Netflix email found in %s — Subject: %s", mailbox, subject)
@@ -230,6 +237,8 @@ def _fetch_netflix_emails() -> list[tuple[str, str, str]]:
 
                     if otp:
                         found.append((subject, from_header, otp))
+                        if fetch_latest:
+                            return found # Stop immediately if we just want the latest OTP
                     else:
                         logger.warning(
                             "⚠️  Could not extract OTP from Netflix email. Subject: %s", subject
@@ -242,11 +251,13 @@ def _fetch_netflix_emails() -> list[tuple[str, str, str]]:
 
 async def _send_otp_to_telegram(bot: Bot, subject: str, sender: str, otp: str) -> None:
     """Send an OTP notification message to the configured Telegram chat."""
+    safe_sender = escape_markdown(sender, version=2)
+    safe_subject = escape_markdown(subject, version=2)
     message = (
         "🔐 *Netflix Verification Code*\n\n"
         f"Your OTP code is:  `{otp}`\n\n"
-        f"📧 *From:* {sender}\n"
-        f"📝 *Subject:* {subject}"
+        f"📧 *From:* {safe_sender}\n"
+        f"📝 *Subject:* {safe_subject}"
     )
     await bot.send_message(
         chat_id=CHAT_ID,
@@ -303,6 +314,38 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
     await update.message.reply_text(text)
 
+async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for /latest — fetches and forwards the latest received OTP code, even if already read."""
+    await update.message.reply_text("🔄 Searching your inbox for the latest Netflix OTP...")
+    
+    try:
+        # Pass True to fetch_latest to ignore UNSEEN flags and limit search to 10
+        results = await asyncio.to_thread(_fetch_netflix_emails, True)
+        
+        if results:
+            subject, sender, otp = results[0]
+            safe_sender = escape_markdown(sender, version=2)
+            safe_subject = escape_markdown(subject, version=2)
+            message = (
+                "🔐 *Latest Netflix Verification Code*\n\n"
+                f"Your OTP code is:  `{otp}`\n\n"
+                f"📧 *From:* {safe_sender}\n"
+                f"📝 *Subject:* {safe_subject}"
+            )
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text=message,
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            logger.info("✅ Latest OTP sent to Telegram via /latest command.")
+        else:
+            await update.message.reply_text("⚠️ No Netflix OTP codes found in recent emails.")
+            logger.info("❌ No OTP found during /latest command search.")
+            
+    except Exception as e:
+        logger.error("Error in cmd_latest: %s", e)
+        await update.message.reply_text("❌ An error occurred while searching for the OTP.")
+
 
 # ─── Post-init hook: start the email polling background task ──────────────────
 
@@ -335,7 +378,6 @@ def _validate_config() -> None:
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
-
 def main() -> None:
     _validate_config()
 
@@ -349,6 +391,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("latest", cmd_latest))
 
     logger.info("🚀 Starting Netflix OTP Telegram Bot...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
