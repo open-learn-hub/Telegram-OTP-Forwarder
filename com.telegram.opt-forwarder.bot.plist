@@ -9,7 +9,7 @@
         <string>/usr/bin/caffeinate</string>
         <string>-ism</string>
         <string>/usr/bin/python3</string>
-        <string>/Users/YOUR_USER_NAME/Documents/my_bot.py</string>
+        <string>/Users/YOUR_USER_NAME/Documents/Telegram_BOT.py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
