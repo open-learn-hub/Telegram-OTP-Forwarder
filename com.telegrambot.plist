@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Netflix OTP Forwarder</key>
+    <string>com.telegram.opt-forwarder.bot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-ism</string>
+        <string>/usr/bin/python3</string>
+        <string>/Users/YOUR_USER_NAME/Documents/my_bot.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/tmp/tgbot.err</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/tgbot.out</string>
+</dict>
+</plist>

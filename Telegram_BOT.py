@@ -181,12 +181,6 @@ def _fetch_netflix_emails() -> list[tuple[str, str, str]]:
             if len(parts) == 2:
                 mailbox_names.append(parts[1].strip('"'))
                 
-        # Prioritize INBOX, then Updates (inserted at 0, so Updates becomes first)
-        for name in list(mailbox_names):
-            if name.upper() == "INBOX":
-                mailbox_names.remove(name)
-                mailbox_names.insert(0, name)
-                
         for name in list(mailbox_names):
             if "updates" in name.lower():
                 mailbox_names.remove(name)
